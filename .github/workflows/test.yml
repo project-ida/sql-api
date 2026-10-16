@@ -1,0 +1,37 @@
+name: Test SQL API
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Disposable CI database credentials; these are not deployment credentials.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: integration-admin
+          POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SQL_API_TEST_ADMIN_DSN: postgresql://postgres:integration-admin@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PHP PostgreSQL extension and psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-pgsql postgresql-client
+      - run: python -m pip install -r client/requirements.txt
+      - run: php -l server/src/api.php
+      - run: php -l server/public/query.php
+      - run: php tests/test_server.php
+      - run: python -m unittest discover -s tests -v

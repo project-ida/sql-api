@@ -1,0 +1,15 @@
+# Add inside the existing HTTPS <VirtualHost *:443> after installing PHP/pgsql.
+# Adjust the absolute checkout path. Expose ONLY server/public, not the repo.
+Alias /sql-api/ /var/www/sql-api/server/public/
+
+<Directory /var/www/sql-api/server/public>
+    Require all granted
+    Options -Indexes
+    AllowOverride None
+    # Forward HTTP Basic credentials to PHP, including CGI/PHP-FPM deployments.
+    CGIPassAuth On
+</Directory>
+
+# Endpoint: https://your-server.example/sql-api/query.php
+# Keep the existing PHP handler and TLS configuration for this virtual host.
+# For long queries, align Apache/FPM execution timeouts with client timeouts.
