@@ -1,8 +1,11 @@
-# Add inside the existing HTTPS <VirtualHost *:443> after installing PHP/pgsql.
-# Adjust the absolute checkout path. Expose ONLY server/public, not the repo.
-Alias /sql-api/ /var/www/sql-api/server/public/
+# Paste inside the existing HTTPS <VirtualHost *:443>, or Include this file
+# from inside that virtual host, after installing PHP/pgsql.
+# Adjust the checkout path. Keep the checkout outside the existing DocumentRoot
+# and expose ONLY server/public. The Alias maps /sql-api/ to this directory;
+# other URL paths continue to use the site's existing configuration.
+Alias "/sql-api/" "/var/www/sql-api/server/public/"
 
-<Directory /var/www/sql-api/server/public>
+<Directory "/var/www/sql-api/server/public">
     Require all granted
     Options -Indexes
     AllowOverride None
@@ -12,4 +15,5 @@ Alias /sql-api/ /var/www/sql-api/server/public/
 
 # Endpoint: https://your-server.example/sql-api/query.php
 # Keep the existing PHP handler and TLS configuration for this virtual host.
+# If the PHP handler is scoped to another directory, apply it to this one too.
 # For long queries, align Apache/FPM execution timeouts with client timeouts.

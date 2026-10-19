@@ -42,6 +42,20 @@ No Composer dependencies or additional application service are required.
    can alternatively live elsewhere: set `SQL_API_CONFIG` in PHP's environment
    to its absolute path. With PHP-FPM this must reach the FPM worker environment.
 
+To load the deployment snippet without pasting it, add this line inside the
+HTTPS virtual host, using your checkout's absolute path:
+
+```apache
+Include "/var/www/sql-api/deploy/apache.conf.example"
+```
+
+The `Alias` maps `/sql-api/` separately from the existing `DocumentRoot`. Keep
+the checkout outside that document root so its `.htaccess` rules do not apply
+to the API's filesystem location. The current website can keep its document
+root and directory-specific redirects. A virtual-host-wide redirect that also
+matches `/sql-api/` would need to be adjusted. Ensure the virtual host's PHP
+handler also applies to the API directory.
+
 The example URL is `https://your-server.example/sql-api/query.php`.
 `server/config.php` is ignored by Git. Leave `allow_http_on_loopback` false in
 production. The endpoint requires Apache's actual HTTPS state, rather than
