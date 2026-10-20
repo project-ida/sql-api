@@ -25,7 +25,7 @@ def response_for(columns, rows, *, complete=True):
 
 class ClientTests(unittest.TestCase):
     def setUp(self):
-        self.con = SQLConnection("https://example.test/sql-api/query.php", "reader", "secret")
+        self.con = SQLConnection("https://example.test/sql-api/query.php", "reader", "secret", database="sample_database")
         self.addCleanup(self.con.close)
         self.con._session.post = Mock()
 
@@ -124,7 +124,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(kwargs["auth"], ("reader", "secret"))
         self.assertTrue(kwargs["verify"])
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertEqual(kwargs["json"], {"sql": "SELECT $1::text", "params": ["O'Reilly"]})
+        self.assertEqual(kwargs["json"], {"database": "sample_database", "sql": "SELECT $1::text", "params": ["O'Reilly"]})
 
     def test_parameter_conversion_keeps_precision_and_bool(self):
         self.respond([], [[]])
@@ -154,10 +154,10 @@ class ClientTests(unittest.TestCase):
 
     def test_http_requires_explicit_loopback_opt_in(self):
         with self.assertRaises(ValueError):
-            SQLConnection("http://example.test/query.php", "reader", "secret", allow_local_http=True)
+            SQLConnection("http://example.test/query.php", "reader", "secret", database="sample_database", allow_local_http=True)
         with self.assertRaises(ValueError):
-            SQLConnection("http://127.0.0.1/query.php", "reader", "secret")
-        with SQLConnection("http://127.0.0.1/query.php", "reader", "secret", allow_local_http=True):
+            SQLConnection("http://127.0.0.1/query.php", "reader", "secret", database="sample_database")
+        with SQLConnection("http://127.0.0.1/query.php", "reader", "secret", database="sample_database", allow_local_http=True):
             pass
 
     def test_redirect_is_not_followed(self):
@@ -171,12 +171,26 @@ class ClientTests(unittest.TestCase):
     def test_invalid_url_and_query_arguments(self):
         for url in ["https://reader:secret@example.test/query.php", "https:///query.php", "https://example.test/query.php?password=secret"]:
             with self.subTest(url=url), self.assertRaises(ValueError):
-                SQLConnection(url, "reader", "secret")
+                SQLConnection(url, "reader", "secret", database="sample_database")
         for chunksize in [0, -1, True, 1.5]:
             with self.subTest(chunksize=chunksize), self.assertRaises(ValueError):
                 self.con.read_sql("SELECT 1", chunksize=chunksize)
         with self.assertRaises(TypeError):
             self.con.read_sql("SELECT $1", params={"a": 1})
+
+    def test_database_is_required_and_validated(self):
+        with self.assertRaises(TypeError):
+            SQLConnection("https://example.test/query.php", "reader", "secret")
+        for database in [None, "", " \t", "bad\0name", 123, False, []]:
+            with self.subTest(database=database), self.assertRaises(ValueError):
+                SQLConnection("https://example.test/query.php", "reader", "secret", database=database)
+
+    def test_database_name_is_forwarded_unchanged(self):
+        database = "data 'quoted' \\ name = example"
+        self.con.database = database
+        self.respond([("value", "int4")], [["1"]])
+        self.con.read_sql("SELECT 1")
+        self.assertEqual(self.con._session.post.call_args.kwargs["json"]["database"], database)
 
 
 if __name__ == "__main__":

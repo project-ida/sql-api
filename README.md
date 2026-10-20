@@ -14,7 +14,7 @@ Python client → HTTPS :443 → Apache/PHP → PostgreSQL
 | --- | --- |
 | `server/public/query.php` | The public POST endpoint |
 | `server/src/api.php` | Authentication, query execution, and response handling |
-| `server/config.example.php` | Fixed database connection settings; copy to `config.php` |
+| `server/config.example.php` | Fixed database host/port settings; copy to `config.php` |
 | `deploy/apache.conf.example` | Alias configuration for the existing HTTPS virtual host |
 | `client/sql_api.py` | Standalone Python helper for pandas |
 | `client/README.md` | Python client usage and examples |
@@ -30,11 +30,10 @@ No Composer dependencies or additional application service are required.
 2. Install/enable PHP's PostgreSQL extension. On Debian/Ubuntu, the package is
    usually `php-pgsql`; see the installation commands below and use the matching
    package for your installed PHP version.
-3. Copy `server/config.example.php` to `server/config.php`. Set `db_name` to
-   your database name; the example leaves it empty. Configure `db_host` and
-   `db_port` for your installation. The host defaults to `127.0.0.1` for a local
-   database connection. The config contains no database username/password: those
-   come from each authenticated request.
+3. Copy `server/config.example.php` to `server/config.php`. Configure `db_host`
+   and `db_port` for your installation. The host defaults to `127.0.0.1` for a
+   local database connection. Each client request supplies its database name
+   and PostgreSQL username/password.
 4. Add the snippet in `deploy/apache.conf.example` **inside the existing HTTPS
    virtual host**, adjusting the checkout path. Keep that virtual host's existing
    PHP handler and TLS configuration. Expose only `server/public`, not the entire
@@ -114,7 +113,9 @@ trusting client-supplied forwarded headers.
 The endpoint connects as the supplied PostgreSQL role. Use a database account
 with the read permissions required by your application. Credentials are sent
 using HTTP Basic authentication over verified HTTPS. PostgreSQL checks the
-credentials and applies that role's permissions.
+credentials and applies that role's database connection and data permissions.
+The database name is required in the JSON request body. The server configuration
+selects the host and port; it contains no database name or fallback.
 
 **The local PostgreSQL connection must check the password.** A matching
 `pg_hba.conf` entry using `trust` would bypass it, and `peer` would authenticate
@@ -142,7 +143,7 @@ history:
 ```sh
 curl --fail-with-body --user '<database_user>' \
   --header 'Content-Type: application/json' \
-  --data '{"sql":"SELECT current_user, current_database()"}' \
+  --data '{"database":"<database_name>","sql":"SELECT current_user, current_database()"}' \
   https://your-server.example/sql-api/query.php
 ```
 
@@ -167,18 +168,22 @@ with SQLConnection(
     os.environ["SQL_API_URL"],
     os.environ["SQL_API_USER"],
     os.environ["SQL_API_PASSWORD"],
+    database=os.environ["SQL_API_DATABASE"],
 ) as connection:
     df = read_sql("SELECT $1::integer AS value", connection, params=[42])
 ```
 
 Set `SQL_API_URL` to the complete HTTPS query endpoint, such as
-`https://your-server.example/sql-api/query.php`. The other two variables contain
-the PostgreSQL username and password. The server configuration selects the
-database. See [client/README.md](client/README.md) for installation, parameterised
-queries, and chunked downloads.
+`https://your-server.example/sql-api/query.php`. Set `SQL_API_USER` and
+`SQL_API_PASSWORD` to the PostgreSQL credentials and `SQL_API_DATABASE` to the
+database name. See [client/README.md](client/README.md) for installation,
+parameterised queries, and chunked downloads.
 
 ## Query and result behaviour
 
+- Each POST requires `database` and `sql` fields and accepts optional `params`.
+  The database must be a non-empty string; missing or malformed values return 400.
+  The requested database is used directly, without a server-side default.
 - Each POST accepts one SQL statement returning rows. CTEs, joins, PostgreSQL
   functions, window functions, and `EXPLAIN` are available subject to the role's
   existing permissions. SQL text is forwarded without rewriting.
@@ -207,9 +212,9 @@ queries, and chunked downloads.
 
 Query errors include PostgreSQL's SQLSTATE and primary error message for the
 authenticated client, without query-body logging. Missing/incorrect
-credentials return 401, permission failures 403, invalid SQL 400, and an
-unreachable database 503. Database connection errors intentionally omit internal
-connection details.
+credentials return 401, database connection or query permission failures 403,
+invalid requests or SQL 400, and a nonexistent or unreachable database 503.
+Database connection errors intentionally omit internal connection details.
 
 ## Development and checks
 
@@ -227,9 +232,10 @@ The Python suite skips database integration tests unless
 `SQL_API_TEST_ADMIN_DSN` is set. For a **disposable test database**, set it to an
 administrator connection string and set `SQL_API_TEST_HOST`,
 `SQL_API_TEST_PORT`, and `SQL_API_TEST_DATABASE` to the matching destination
-(defaults: `127.0.0.1`, `5432`, `postgres`). Tests create/remove their own schema
-and read-only role, start a local PHP server, and verify queries, authentication,
-write rejection, type fidelity, and chunked downloads using synthetic fixtures.
+(defaults: `127.0.0.1`, `5432`, `postgres`). Tests create/remove isolated databases,
+a schema, and a read-only role, start a local PHP server, and verify database
+selection and permissions, queries, authentication, write rejection, type
+fidelity, and chunked downloads using synthetic fixtures.
 They require `psql`, PHP with pgsql, and host password authentication. GitHub
 Actions provides a disposable PostgreSQL service and runs these tests.
 

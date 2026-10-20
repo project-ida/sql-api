@@ -1,7 +1,7 @@
 """End-to-end tests against a disposable PostgreSQL database and local PHP.
 
 Set SQL_API_TEST_ADMIN_DSN plus SQL_API_TEST_HOST/PORT/DATABASE. Tests create
-and remove their own schema and role; never point them at a production database.
+and remove their own databases, schema, and role; use a disposable cluster.
 """
 
 import base64
@@ -52,12 +52,20 @@ class APIIntegrationTests(unittest.TestCase):
             GRANT SELECT ON {cls.schema}.sample_events TO {cls.role};
         """)
         cls.addClassCleanup(cls.admin, f"DROP SCHEMA {cls.schema} CASCADE; DROP ROLE {cls.role};")
+        cls.database = os.environ.get("SQL_API_TEST_DATABASE", "postgres")
+        # Exercise libpq quoting with a real database name containing ' \\ and =.
+        cls.other_database = cls.schema + " 'quoted'\\name = value"
+        cls.denied_database = cls.schema + "_denied"
+        for database in [cls.other_database, cls.denied_database]:
+            cls.admin(f'CREATE DATABASE "{database}"')
+            cls.addClassCleanup(cls.admin, f'DROP DATABASE "{database}"')
+            cls.admin(f'REVOKE CONNECT ON DATABASE "{database}" FROM PUBLIC')
+        cls.admin(f'GRANT CONNECT ON DATABASE "{cls.other_database}" TO {cls.role}')
         directory = tempfile.TemporaryDirectory(prefix="sql-api-test-")
         cls.addClassCleanup(directory.cleanup)
         config = {
             "db_host": os.environ.get("SQL_API_TEST_HOST", "127.0.0.1"),
             "db_port": int(os.environ.get("SQL_API_TEST_PORT", "5432")),
-            "db_name": os.environ.get("SQL_API_TEST_DATABASE", "postgres"),
             "allow_http_on_loopback": True,
         }
         config_file = Path(directory.name) / "config.php"
@@ -94,7 +102,7 @@ class APIIntegrationTests(unittest.TestCase):
             raise RuntimeError("PHP test server did not start")
 
     def setUp(self):
-        self.con = SQLConnection(self.url, self.role, self.password, allow_local_http=True)
+        self.con = SQLConnection(self.url, self.role, self.password, database=self.database, allow_local_http=True)
         self.addCleanup(self.con.close)
 
     def test_event_query_and_high_resolution_timestamps(self):
@@ -156,7 +164,7 @@ class APIIntegrationTests(unittest.TestCase):
         self.assertEqual(count["count"].iloc[0], 3)
 
     def test_wrong_password_is_rejected_by_postgresql(self):
-        with SQLConnection(self.url, self.role, "incorrect", allow_local_http=True) as wrong:
+        with SQLConnection(self.url, self.role, "incorrect", database=self.database, allow_local_http=True) as wrong:
             with self.assertRaises(SQLAPIError) as caught:
                 wrong.read_sql("SELECT 1")
         self.assertEqual(caught.exception.status_code, 401)
@@ -177,6 +185,47 @@ class APIIntegrationTests(unittest.TestCase):
     def test_multiple_statements_rejected_by_postgresql(self):
         with self.assertRaises(SQLAPIError):
             self.con.read_sql("SELECT 1; SELECT 2")
+
+    def test_client_selects_database_with_connection_string_characters(self):
+        with SQLConnection(self.url, self.role, self.password, database=self.other_database, allow_local_http=True) as other:
+            frame = other.read_sql("SELECT current_database() AS database")
+        self.assertEqual(frame["database"].iloc[0], self.other_database)
+        frame = self.con.read_sql("SELECT current_database() AS database")
+        self.assertEqual(frame["database"].iloc[0], self.database)
+
+    def test_database_connect_permission_is_enforced(self):
+        with SQLConnection(self.url, self.role, self.password, database=self.denied_database, allow_local_http=True) as denied:
+            with self.assertRaises(SQLAPIError) as caught:
+                denied.read_sql("SELECT 1")
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(caught.exception.code, "database_forbidden")
+
+    def test_nonexistent_database_fails_without_fallback(self):
+        with SQLConnection(self.url, self.role, self.password, database=self.schema + "_missing", allow_local_http=True) as missing:
+            with self.assertRaises(SQLAPIError) as caught:
+                missing.read_sql("SELECT 1")
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.code, "database_unavailable")
+
+    def test_database_is_required_and_checked_before_connecting(self):
+        for value in [None, "", " \t", "bad\0name", 123, False, [], {}]:
+            with self.subTest(database=value):
+                response = requests.post(self.url, json={"database": value, "sql": "SELECT 1"}, auth=(self.role, self.password), timeout=5)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("database", response.json()["error"]["message"])
+        response = requests.post(self.url, json={"sql": "SELECT 1"}, auth=(self.role, self.password), timeout=5)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("database", response.json()["error"]["message"])
+
+    def test_client_cannot_override_configured_host_or_port(self):
+        response = requests.post(self.url, json={
+            "database": self.database,
+            "sql": "SELECT current_database() AS database",
+            "host": "203.0.113.1", "db_host": "203.0.113.1", "port": 1, "db_port": 1,
+        }, auth=(self.role, self.password), timeout=5)
+        self.assertEqual(response.status_code, 200)
+        records = [json.loads(line) for line in response.text.splitlines()]
+        self.assertEqual(records[1]["values"], [self.database])
 
 
 if __name__ == "__main__":

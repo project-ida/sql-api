@@ -12,7 +12,8 @@ python -m pip install -r client/requirements.txt
 Make the `client/` directory available on Python's import path. For example, add
 it to `PYTHONPATH` or place `sql_api.py` alongside your application.
 
-Supply the endpoint URL and PostgreSQL credentials through environment variables:
+Supply the endpoint URL, PostgreSQL credentials, and database name through
+environment variables:
 
 ```python
 import os
@@ -23,6 +24,7 @@ connection = SQLConnection(
     os.environ["SQL_API_URL"],
     os.environ["SQL_API_USER"],
     os.environ["SQL_API_PASSWORD"],
+    database=os.environ["SQL_API_DATABASE"],
     timeout=(10, 600),  # connect and socket-read timeout in seconds
 )
 
@@ -31,8 +33,9 @@ df = read_sql("SELECT $1::integer AS value", connection, params=[42])
 
 `SQL_API_URL` is the full query endpoint URL, for example
 `https://your-server.example/sql-api/query.php`. The API's server configuration
-selects the PostgreSQL host and database; the client supplies the username and
-password. Each query runs with that database account's permissions.
+selects the PostgreSQL host and port. The client supplies the username, password,
+and required database name. There is no server-side database default. Each query
+runs with that database account's permissions in the selected database.
 
 `connection.read_sql(query, ...)` is also available. Call `connection.close()`
 when finished, or use `with SQLConnection(...) as connection:`. TLS certificates

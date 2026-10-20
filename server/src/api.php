@@ -80,6 +80,10 @@ function parse_request(string $body): array
         || str_contains($request->sql, "\0")) {
         throw new ApiError(400, 'invalid_request', 'Provide a non-empty SQL string in the sql field.');
     }
+    if (!isset($request->database) || !is_string($request->database)
+        || trim($request->database) === '' || str_contains($request->database, "\0")) {
+        throw new ApiError(400, 'invalid_request', 'Provide a non-empty database name in the database field.');
+    }
     $params = $request->params ?? [];
     if (!is_array($params)) {
         throw new ApiError(400, 'invalid_request', 'params must be a JSON array of scalar values or null.');
@@ -99,16 +103,16 @@ function parse_request(string $body): array
         }
     }
     unset($param);
-    return [$request->sql, $params];
+    return [$request->sql, $params, $request->database];
 }
 
 /** Catch connection warnings so libpq messages never leak credentials to HTTP. */
-function connect(array $config, string $username, string $password): \PgSql\Connection
+function connect(array $config, string $username, string $password, string $database): \PgSql\Connection
 {
     $fields = [
         'host' => $config['db_host'],
         'port' => $config['db_port'] ?? 5432,
-        'dbname' => $config['db_name'],
+        'dbname' => $database,
         'user' => $username,
         'password' => $password,
         'connect_timeout' => $config['connect_timeout'] ?? 10,
@@ -133,7 +137,10 @@ function connect(array $config, string $username, string $password): \PgSql\Conn
         if (preg_match('/authentication failed|no password supplied|role .* does not exist/i', $warning)) {
             throw new ApiError(401, 'authentication_failed', 'PostgreSQL rejected the username or password.');
         }
-        throw new ApiError(503, 'database_unavailable', 'Cannot connect to the configured PostgreSQL database.');
+        if (str_contains($warning, 'permission denied for database')) {
+            throw new ApiError(403, 'database_forbidden', 'PostgreSQL denied access to the requested database.');
+        }
+        throw new ApiError(503, 'database_unavailable', 'Cannot connect to the requested PostgreSQL database.');
     }
     return $connection;
 }
@@ -193,16 +200,16 @@ function run(): void
             throw new ApiError(503, 'not_configured', 'The SQL API has not been configured.');
         }
         $config = require $path;
-        if (!is_array($config) || empty($config['db_host']) || empty($config['db_name'])) {
+        if (!is_array($config) || empty($config['db_host'])) {
             throw new ApiError(503, 'not_configured', 'The SQL API configuration is incomplete.');
         }
         validate_request($_SERVER, $config);
         [$username, $password] = credentials($_SERVER);
-        [$sql, $params] = parse_request(file_get_contents('php://input'));
+        [$sql, $params, $database] = parse_request(file_get_contents('php://input'));
         if (!extension_loaded('pgsql')) {
             throw new ApiError(503, 'not_configured', 'The PHP pgsql extension is required.');
         }
-        $connection = connect($config, $username, $password);
+        $connection = connect($config, $username, $password, $database);
         $result = execute($connection, $sql, $params);
         $streaming = true;
         stream_result($result);

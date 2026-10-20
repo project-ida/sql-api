@@ -5,9 +5,9 @@ Python's import path. Install its dependencies with:
 
     python -m pip install "pandas>=2.0" "requests>=2.31"
 
-Use the full HTTPS query endpoint and your PostgreSQL username/password.
-Replace the example URL and username below; getpass prompts for the password.
-The API server's configuration selects the database and its local port.
+Use the full HTTPS query endpoint, PostgreSQL username/password, and database
+name. Replace the example URL, username, and database below; getpass prompts
+for the password. The API server's configuration selects the local host/port.
 
 Basic usage::
 
@@ -18,6 +18,7 @@ Basic usage::
         "https://your-server.example/sql-api/query.php",
         "your_database_user",
         getpass("PostgreSQL password: "),
+        database="your_database_name",
         timeout=(10, 300),  # connect and socket-read timeout in seconds
     ) as connection:
         df = read_sql("SELECT current_user, current_database()", connection)
@@ -216,14 +217,16 @@ def _dataframe(columns, rows, index_col, coerce_float):
 class SQLConnection:
     """Connection settings for independent SQL-over-HTTPS requests.
 
-    ``url`` is the full query.php URL. Passwords are excluded from repr. TLS
-    certificates are verified; ``ca_bundle`` optionally names a custom CA file.
+    ``url`` is the full query.php URL. ``database`` is required and sent with
+    each query; the server selects the host/port. Passwords are excluded from
+    repr. TLS certificates are verified; ``ca_bundle`` optionally names a custom
+    CA file.
     HTTP is allowed only on loopback and only with ``allow_local_http=True``.
     ``timeout`` is a requests timeout in seconds (connect, socket read), not a
     total query duration. There are no automatic retries or redirects.
     """
 
-    def __init__(self, url, username, password, *, timeout=(10, 300), ca_bundle=None, allow_local_http=False):
+    def __init__(self, url, username, password, database, *, timeout=(10, 300), ca_bundle=None, allow_local_http=False):
         parsed = urlsplit(url)
         local_http = allow_local_http and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         if parsed.scheme != "https" and not local_http:
@@ -234,15 +237,18 @@ class SQLConnection:
             raise ValueError("HTTP Basic authentication requires a non-empty username without a colon.")
         if not isinstance(password, str) or not password:
             raise ValueError("A non-empty PostgreSQL password is required.")
+        if not isinstance(database, str) or not database.strip() or "\0" in database:
+            raise ValueError("A non-empty PostgreSQL database name without NUL characters is required.")
         self.url = url
         self.username = username
         self._password = password
+        self.database = database
         self.timeout = timeout
         self._verify = str(ca_bundle) if ca_bundle is not None else True
         self._session = requests.Session()
 
     def __repr__(self):
-        return f"SQLConnection(url={self.url!r}, username={self.username!r})"
+        return f"SQLConnection(url={self.url!r}, username={self.username!r}, database={self.database!r})"
 
     def __enter__(self):
         return self
@@ -257,7 +263,7 @@ class SQLConnection:
         return read_sql(sql, self, index_col=index_col, params=params, chunksize=chunksize, coerce_float=coerce_float)
 
     def _frames(self, sql, params, index_col, chunksize, coerce_float):
-        payload = {"sql": sql, "params": [_parameter(value) for value in params]}
+        payload = {"database": self.database, "sql": sql, "params": [_parameter(value) for value in params]}
         try:
             with self._session.post(
                 self.url, json=payload, auth=(self.username, self._password),
