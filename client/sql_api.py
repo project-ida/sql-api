@@ -1,7 +1,48 @@
 """Run PostgreSQL queries over HTTPS and return pandas DataFrames.
 
-Uses PostgreSQL username/password authentication. SQL is supplied by the caller;
-optional bound parameters use PostgreSQL's $1, $2, ... placeholders.
+Save this file as sql_api.py alongside your script, or put its directory on
+Python's import path. Install its dependencies with:
+
+    python -m pip install "pandas>=2.0" "requests>=2.31"
+
+Use the full HTTPS query endpoint and your PostgreSQL username/password.
+Replace the example URL and username below; getpass prompts for the password.
+The API server's configuration selects the database and its local port.
+
+Basic usage::
+
+    from getpass import getpass
+    from sql_api import SQLConnection, SQLAPIError, read_sql
+
+    with SQLConnection(
+        "https://your-server.example/sql-api/query.php",
+        "your_database_user",
+        getpass("PostgreSQL password: "),
+        timeout=(10, 300),  # connect and socket-read timeout in seconds
+    ) as connection:
+        df = read_sql("SELECT current_user, current_database()", connection)
+        print(df)  # df is a pandas DataFrame
+
+        # Optional bound values use PostgreSQL's $1, $2, ... placeholders.
+        df = read_sql("SELECT $1::integer AS value", connection, params=[42])
+
+        # Optional index_col selects the DataFrame index.
+        df = read_sql("SELECT 1 AS id, 'example' AS label", connection, index_col="id")
+
+        # Optional chunksize returns an iterator of DataFrames.
+        for chunk in read_sql(
+            "SELECT generate_series(1, 10000) AS id", connection, chunksize=1000
+        ):
+            print(len(chunk))
+
+connection.read_sql(query, ...) is also supported. The with block closes the
+client automatically; otherwise call connection.close() when finished.
+
+Each query uses an independent database session. TLS certificates are verified.
+Consume chunk iterators to completion so interrupted downloads are detected;
+chunks reduce client memory use, while the server still buffers its result.
+HTTP, PostgreSQL, and incomplete-result errors raise SQLAPIError, which exposes
+status_code and sqlstate when available.
 """
 
 from __future__ import annotations
