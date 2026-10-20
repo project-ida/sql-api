@@ -43,7 +43,7 @@ are verified. For a custom trusted CA, use `ca_bundle="/path/to/ca.pem"`.
 
 ## Parameters and DataFrame options
 
-Optional bound parameters use PostgreSQL's native positional placeholders:
+Pass a list or tuple with PostgreSQL's native positional placeholders:
 
 ```python
 df = read_sql(
@@ -54,12 +54,37 @@ df = read_sql(
 )
 ```
 
+Or pass a dictionary with `%(name)s` placeholders:
+
+```python
+df = read_sql(
+    """SELECT %(id)s::bigint AS id, %(label)s::text AS label
+       WHERE %(id)s::bigint > 0""",
+    connection,
+    params={"id": 123, "label": "example"},
+    index_col="id",
+)
+```
+
+The helper converts named placeholders to `$1`, `$2`, … before sending the
+request. Repeated names reuse the same parameter, and dictionary order does not
+matter. Values are always sent separately from SQL. Missing names raise
+`ValueError`; unused dictionary entries are ignored. Both forms work with the
+existing server.
+
+Do not mix placeholder styles in one query or put placeholders inside quotes.
+Placeholder-like text inside SQL strings, quoted identifiers, dollar-quoted
+strings, or comments is left alone. In dictionary mode, `%%` in the SQL becomes
+a literal `%`; a single `%` modulo operator also works. Percent signs inside
+parameter values are passed unchanged. SQL using positional parameters is sent
+unchanged.
+
 Datetime/date/time values and pandas timestamps are encoded as ISO strings.
 Numbers, strings, booleans, and null values are supported. For an array parameter,
 pass its PostgreSQL text form such as `"{1,2}"` with a `$1::int[]` cast.
 Parameters bind values; identifiers such as table names belong in the SQL text.
 
-The helper supports `index_col`, positional `params`, `chunksize`, and
+The helper supports `index_col`, positional or named `params`, `chunksize`, and
 `coerce_float`. It implements a subset of `pandas.read_sql` options. Each query
 has an independent database session, so temporary tables and transaction state
 do not persist between calls.

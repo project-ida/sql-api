@@ -2,6 +2,7 @@ import datetime as dt
 import json
 import unittest
 from decimal import Decimal
+from types import MappingProxyType
 from unittest.mock import Mock
 
 import pandas as pd
@@ -133,6 +134,96 @@ class ClientTests(unittest.TestCase):
         sent = self.con._session.post.call_args.kwargs["json"]["params"]
         self.assertEqual(sent, [str(2**63 - 1), "1.1234567890123456789", False, None, "2000-01-01T17:00:00"])
 
+    def test_named_query_reuses_values_in_order_of_first_occurrence(self):
+        self.respond([("file", "text")], [["example.root"]])
+        query = """
+            SELECT * FROM root_files
+            WHERE time > %(event_time)s AND file LIKE %(file_pattern)s
+            ORDER BY ABS(EXTRACT(EPOCH FROM (%(event_time)s - time))) LIMIT 1;
+        """
+        event_time = pd.Timestamp("2000-01-01 17:00:00.123456")
+        params = {"file_pattern": "%_CH3@%", "event_time": event_time}
+        read_sql(query, con=self.con, params=params)
+        payload = self.con._session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["sql"], query.replace("%(event_time)s", "$1").replace("%(file_pattern)s", "$2"))
+        self.assertEqual(payload["params"], [event_time.isoformat(), "%_CH3@%"])
+        self.assertEqual(list(params), ["file_pattern", "event_time"])
+
+    def test_named_values_are_bound_without_sql_interpolation(self):
+        self.respond([], [])
+        value = "O'Reilly'); DROP TABLE example; -- %(other)s $1 %%"
+        self.con.read_sql("SELECT %(value)s::text", params={"value": value})
+        payload = self.con._session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["sql"], "SELECT $1::text")
+        self.assertEqual(payload["params"], [value])
+
+    def test_named_placeholders_skip_sql_quoting_comments_and_identifiers(self):
+        fragments = [
+            "'it''s %(missing)s and $1'",
+            r"'backslash\'",
+            '"identifier""%(missing)s$1"',
+            r"E'it\'s %(missing)s and $1'",
+            r"e'backslash\\ %(missing)s and $1'",
+            "$$%(missing)s and $1$$",
+            "$tag$%(missing)s $$ ' $other$ and $1$tag$",
+            "$täg_1$%(missing)s and $1$täg_1$",
+            "1 /* %(missing)s /* nested */ and $1 */",
+            "1 -- %(missing)s and $1\n",
+            "1 -- %(missing)s and $1\r",
+            "identifier$1",
+        ]
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.respond([], [])
+                self.con.read_sql(f"SELECT {fragment}, %(value)s", params={"value": 42})
+                payload = self.con._session.post.call_args.kwargs["json"]
+                self.assertEqual(payload["sql"], f"SELECT {fragment}, $1")
+                self.assertEqual(payload["params"], ["42"])
+
+    def test_named_params_allow_modulo_and_escaped_percent_signs(self):
+        self.respond([], [])
+        self.con.read_sql(
+            "SELECT %(value)s::int % 3, 10 %% %(value)s::int, '100%%' /* %% */",
+            params={"value": 4},
+        )
+        payload = self.con._session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["sql"], "SELECT $1::int % 3, 10 % $1::int, '100%' /* % */")
+        self.assertEqual(payload["params"], ["4"])
+
+    def test_named_params_accept_mappings_and_ignore_unused_keys(self):
+        self.respond([], [])
+        self.con.read_sql("SELECT %(value)s::int", params=MappingProxyType({"unused": object(), "value": 42}))
+        payload = self.con._session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["sql"], "SELECT $1::int")
+        self.assertEqual(payload["params"], ["42"])
+
+    def test_empty_named_params_and_sql_without_placeholders(self):
+        self.respond([], [])
+        self.con.read_sql("SELECT 1", params={})
+        self.assertEqual(self.con._session.post.call_args.kwargs["json"]["params"], [])
+
+    def test_missing_named_param_is_rejected_before_request(self):
+        for options in [{}, {"chunksize": 1}]:
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "Missing named SQL parameter: 'missing'"):
+                self.con.read_sql("SELECT %(value)s, %(missing)s", params={"value": 1}, **options)
+        self.con._session.post.assert_not_called()
+
+    def test_dictionary_params_reject_native_or_mixed_placeholders(self):
+        for query in ["SELECT $1", "SELECT $1, %(value)s", "SELECT %(value)s, $2"]:
+            with self.subTest(query=query), self.assertRaisesRegex(ValueError, "do not mix"):
+                self.con.read_sql(query, params={"value": 1})
+        self.con._session.post.assert_not_called()
+
+    def test_positional_lists_and_tuples_leave_sql_unchanged(self):
+        query = "SELECT $1::int, '%(literal)s 100%%' AS literal"
+        for params in [[42], (42,)]:
+            with self.subTest(params=params):
+                self.respond([], [])
+                self.con.read_sql(query, params=params)
+                payload = self.con._session.post.call_args.kwargs["json"]
+                self.assertEqual(payload["sql"], query)
+                self.assertEqual(payload["params"], ["42"])
+
     def test_numeric_json_bytes_boolean_and_timezone(self):
         self.respond(
             [("n", "numeric"), ("j", "jsonb"), ("b", "bytea"), ("flag", "bool"), ("t", "timestamptz")],
@@ -175,8 +266,9 @@ class ClientTests(unittest.TestCase):
         for chunksize in [0, -1, True, 1.5]:
             with self.subTest(chunksize=chunksize), self.assertRaises(ValueError):
                 self.con.read_sql("SELECT 1", chunksize=chunksize)
-        with self.assertRaises(TypeError):
-            self.con.read_sql("SELECT $1", params={"a": 1})
+        for params in ["value", b"value", 42, {1, 2}]:
+            with self.subTest(params=params), self.assertRaises(TypeError):
+                self.con.read_sql("SELECT $1", params=params)
 
     def test_database_is_required_and_validated(self):
         with self.assertRaises(TypeError):

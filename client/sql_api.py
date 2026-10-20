@@ -27,6 +27,13 @@ Basic usage::
         # Optional bound values use PostgreSQL's $1, $2, ... placeholders.
         df = read_sql("SELECT $1::integer AS value", connection, params=[42])
 
+        # Or use %(name)s placeholders with a dictionary (names can repeat).
+        df = read_sql(
+            "SELECT %(value)s::integer + %(value)s::integer AS doubled",
+            connection,
+            params={"value": 21},
+        )
+
         # Optional index_col selects the DataFrame index.
         df = read_sql("SELECT 1 AS id, 'example' AS label", connection, index_col="id")
 
@@ -38,6 +45,11 @@ Basic usage::
 
 connection.read_sql(query, ...) is also supported. The with block closes the
 client automatically; otherwise call connection.close() when finished.
+
+Named placeholders are translated to $1, $2, ...; values are always sent
+separately. Do not quote placeholders or mix the two styles in one query.
+With dictionary parameters, %% escapes a literal percent sign. Placeholders
+inside quoted SQL text or comments are left alone.
 
 Each query uses an independent database session. TLS certificates are verified.
 Consume chunk iterators to completion so interrupted downloads are detected;
@@ -52,8 +64,9 @@ import datetime as dt
 import json
 import math
 import numbers
+import re
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import Iterator, Sequence
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -70,6 +83,88 @@ class SQLAPIError(RuntimeError):
         self.status_code = status_code
         self.sqlstate = sqlstate
         self.code = code
+
+
+_NAMED_PARAMETER = re.compile(r"%\(([^()%]+)\)s")
+
+
+def _identifier_part(char):
+    # PostgreSQL also permits non-ASCII characters in unquoted identifiers.
+    return char.isalnum() or char in "_$" or ord(char) >= 128
+
+
+def _named_parameters(sql, params):
+    """Translate named placeholders in SQL code, never interpolate values."""
+    parts, values, positions = [], [], {}
+    position = 0
+    while position < len(sql):
+        start = position
+        char = sql[position]
+        if sql.startswith("--", position):
+            while position < len(sql) and sql[position] not in "\r\n":
+                position += 1
+        elif sql.startswith("/*", position):
+            depth = 1
+            position += 2
+            while position < len(sql) and depth:
+                if sql.startswith("/*", position):
+                    depth += 1
+                    position += 2
+                elif sql.startswith("*/", position):
+                    depth -= 1
+                    position += 2
+                else:
+                    position += 1
+        elif char in "'\"":
+            # E'...' strings additionally allow backslash-escaped quotes.
+            escaped = char == "'" and position > 0 and sql[position - 1] in "eE" and (
+                position == 1 or not _identifier_part(sql[position - 2])
+            )
+            position += 1
+            while position < len(sql):
+                if escaped and sql[position] == "\\":
+                    position = min(position + 2, len(sql))
+                elif sql[position] == char:
+                    position += 1
+                    if position < len(sql) and sql[position] == char:
+                        position += 1
+                    else:
+                        break
+                else:
+                    position += 1
+        elif char == "$" and (position == 0 or not _identifier_part(sql[position - 1])):
+            if position + 1 < len(sql) and sql[position + 1] in "0123456789":
+                raise ValueError("Use %(name)s placeholders with dictionary params; do not mix them with $1, $2, ... placeholders.")
+            # Dollar-quoted strings use $$ or $tag$ delimiters. Tags follow
+            # identifier rules but cannot themselves contain a dollar sign.
+            end = position + 1
+            while end < len(sql) and sql[end] != "$" and _identifier_part(sql[end]):
+                end += 1
+            if end < len(sql) and sql[end] == "$":
+                delimiter = sql[position:end + 1]
+                closing = sql.find(delimiter, end + 1)
+                position = len(sql) if closing == -1 else closing + len(delimiter)
+            else:
+                position += 1
+        elif sql.startswith("%%", position):
+            parts.append("%")
+            position += 2
+            continue
+        elif char == "%" and (match := _NAMED_PARAMETER.match(sql, position)):
+            name = match.group(1)
+            if name not in params:
+                raise ValueError(f"Missing named SQL parameter: {name!r}")
+            if name not in positions:
+                values.append(params[name])
+                positions[name] = len(values)
+            parts.append(f"${positions[name]}")
+            position = match.end()
+            continue
+        else:
+            position += 1
+        # As in psycopg-style parameter strings, %% denotes a literal %.
+        parts.append(sql[start:position].replace("%%", "%"))
+    return "".join(parts), values
 
 
 def _parameter(value):
@@ -336,9 +431,14 @@ def read_sql(sql, con, index_col=None, params=None, *, chunksize=None, coerce_fl
 
     A small alternative to ``pd.read_sql(sql, engine, index_col=None)``. Each
     call is an independent database session; temporary tables and transactions
-    do not persist between calls. SQL strings are forwarded without rewriting.
-    ``params`` is a sequence for PostgreSQL $1, $2, ... placeholders. Arrays can
-    be passed in PostgreSQL text form, e.g. "{1,2}" with a $1::int[] cast.
+    do not persist between calls. ``params`` accepts a list/tuple for PostgreSQL
+    $1, $2, ... placeholders, or a dictionary for %(name)s placeholders. Named
+    placeholders are translated to positional ones; repeated names reuse a
+    value. Values are always bound separately. Do not mix placeholder styles or
+    quote placeholders. In dictionary mode, %% becomes a literal %, and quoted
+    text/comments are skipped when finding placeholders. Unused keys are ignored;
+    missing keys raise ValueError. With positional params, SQL is unchanged.
+    Arrays can be passed in PostgreSQL text form, e.g. "{1,2}" with an int[] cast.
     Timestamp columns are parsed automatically; timestamptz is normalized to
     UTC. Nullable integers use pandas Int64 to preserve exact values. numeric
     uses float by default, as in pandas; set coerce_float=False for Decimal.
@@ -349,8 +449,10 @@ def read_sql(sql, con, index_col=None, params=None, *, chunksize=None, coerce_fl
         raise ValueError("sql must be a non-empty SQL string")
     if params is None:
         params = []
-    if isinstance(params, (str, bytes, dict)) or not isinstance(params, Sequence):
-        raise TypeError("params must be a sequence for $1, $2, ... placeholders")
+    if isinstance(params, Mapping):
+        sql, params = _named_parameters(sql, params)
+    elif isinstance(params, (str, bytes)) or not isinstance(params, Sequence):
+        raise TypeError("params must be a list/tuple for $1, $2, ... placeholders or a dictionary for %(name)s placeholders")
     if chunksize is not None and (isinstance(chunksize, bool) or not isinstance(chunksize, int) or chunksize <= 0):
         raise ValueError("chunksize must be a positive integer")
     frames = con._frames(sql, params, index_col, chunksize, coerce_float)

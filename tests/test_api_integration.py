@@ -147,6 +147,54 @@ class APIIntegrationTests(unittest.TestCase):
         self.assertEqual(frame["json"].iloc[0], {"a": [1, 2]})
         self.assertEqual(frame["bytes"].iloc[0], b"\x00\xff")
 
+    def test_named_root_file_query_with_repeated_timestamp_and_like_pattern(self):
+        query = """
+            WITH root_files(time, file) AS (VALUES
+                (timestamp '2000-01-01 17:00:02', 'example_CH3@second.root'),
+                (timestamp '2000-01-01 17:00:00', 'example_CH3@earlier.root'),
+                (timestamp '2000-01-01 17:00:01', 'example_CH8@other.root'),
+                (timestamp '2000-01-01 17:00:01', 'example_CH3@first.root')
+            )
+            SELECT * FROM root_files
+            WHERE time > %(event_time)s
+              AND file LIKE %(file_pattern)s
+            ORDER BY ABS(EXTRACT(EPOCH FROM (%(event_time)s - time)))
+            LIMIT 1;
+        """
+        frame = self.con.read_sql(query, params={
+            "file_pattern": "%_CH3@%",
+            "event_time": pd.Timestamp("2000-01-01 17:00:00.5"),
+        })
+        frame.set_index("time", inplace=True)
+        self.assertEqual(list(frame["file"]), ["example_CH3@first.root"])
+        self.assertEqual(frame.index[0], pd.Timestamp("2000-01-01 17:00:01"))
+
+    def test_named_values_remain_data_with_quotes_and_sql_characters(self):
+        value = "O'Reilly'); DROP TABLE example; -- %(other)s $1 %%"
+        frame = self.con.read_sql(
+            "SELECT %(value)s::text AS first, %(value)s::text AS repeated",
+            params={"unused": None, "value": value},
+        )
+        self.assertEqual(frame.to_dict("list"), {"first": [value], "repeated": [value]})
+
+    def test_named_placeholders_preserve_quoted_sql_and_comments(self):
+        frame = self.con.read_sql(r"""
+            SELECT %(value)s::int AS bound,
+                   'it''s %(missing)s $1' AS ordinary,
+                   E'it\'s %(missing)s $1' AS escaped,
+                   $tag$%(missing)s $1 ' $$ $tag$ AS dollar,
+                   '100%%' AS percent,
+                   10 %% %(value)s::int AS modulo,
+                   10 % %(value)s::int AS raw_modulo,
+                   7 AS "identifier$1%(missing)s"
+            /* %(missing)s /* nested */ $1 */
+            -- %(missing)s $1
+        """, params={"value": 4})
+        self.assertEqual(frame.iloc[0].tolist(), [
+            4, "it's %(missing)s $1", "it's %(missing)s $1",
+            "%(missing)s $1 ' $$ ", "100%", 2, 2, 7,
+        ])
+
     def test_empty_result_and_chunked_download(self):
         frame = self.con.read_sql(f"SELECT * FROM {self.schema}.sample_events WHERE false", index_col="time")
         self.assertTrue(frame.empty)

@@ -171,6 +171,10 @@ with SQLConnection(
     database=os.environ["SQL_API_DATABASE"],
 ) as connection:
     df = read_sql("SELECT $1::integer AS value", connection, params=[42])
+    # Named parameters are also supported by the Python helper.
+    df = read_sql(
+        "SELECT %(value)s::integer AS value", connection, params={"value": 42}
+    )
 ```
 
 Set `SQL_API_URL` to the complete HTTPS query endpoint, such as
@@ -186,9 +190,11 @@ parameterised queries, and chunked downloads.
   The requested database is used directly, without a server-side default.
 - Each POST accepts one SQL statement returning rows. CTEs, joins, PostgreSQL
   functions, window functions, and `EXPLAIN` are available subject to the role's
-  existing permissions. SQL text is forwarded without rewriting.
+  existing permissions. The server forwards SQL text without rewriting.
 - Optional parameters are a JSON array using PostgreSQL `$1`, `$2`, …
-  placeholders. Multiple SQL commands in one request are rejected by PostgreSQL's
+  placeholders. The Python helper also accepts dictionaries with `%(name)s`
+  placeholders and converts them to this format, keeping values separate from
+  SQL. Multiple SQL commands in one request are rejected by PostgreSQL's
   parameterised-query protocol; trailing semicolons and CTEs are fine.
 - Each request uses a new database connection. Temporary tables, transaction
   state, and session settings do not persist across requests. This is a
@@ -234,8 +240,8 @@ administrator connection string and set `SQL_API_TEST_HOST`,
 `SQL_API_TEST_PORT`, and `SQL_API_TEST_DATABASE` to the matching destination
 (defaults: `127.0.0.1`, `5432`, `postgres`). Tests create/remove isolated databases,
 a schema, and a read-only role, start a local PHP server, and verify database
-selection and permissions, queries, authentication, write rejection, type
-fidelity, and chunked downloads using synthetic fixtures.
+selection and permissions, positional and named parameters, authentication,
+write rejection, type fidelity, and chunked downloads using synthetic fixtures.
 They require `psql`, PHP with pgsql, and host password authentication. GitHub
 Actions provides a disposable PostgreSQL service and runs these tests.
 
