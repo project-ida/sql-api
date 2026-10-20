@@ -28,7 +28,8 @@ No Composer dependencies or additional application service are required.
 
 1. Place this checkout somewhere such as `/var/www/sql-api`.
 2. Install/enable PHP's PostgreSQL extension. On Debian/Ubuntu, the package is
-   usually `php-pgsql`; use the matching package for your installed PHP version.
+   usually `php-pgsql`; see the installation commands below and use the matching
+   package for your installed PHP version.
 3. Copy `server/config.example.php` to `server/config.php`. Set `db_name` to
    your database name; the example leaves it empty. Configure `db_host` and
    `db_port` for your installation. The host defaults to `127.0.0.1` for a local
@@ -41,6 +42,53 @@ No Composer dependencies or additional application service are required.
 5. Ensure PHP can read `server/config.php` and `server/src/api.php`. The config
    can alternatively live elsewhere: set `SQL_API_CONFIG` in PHP's environment
    to its absolute path. With PHP-FPM this must reach the FPM worker environment.
+
+### Install and enable the PHP extension on Debian/Ubuntu
+
+Run these commands on the server when using the distribution's default PHP
+version:
+
+```sh
+sudo apt update
+sudo apt install php-pgsql
+sudo phpenmod pgsql
+```
+
+Installation normally enables the extension automatically; `phpenmod` explicitly
+ensures it is enabled. If the website uses a specific PHP version, use its
+matching package and enable command instead, for example `php8.3-pgsql` and
+`sudo phpenmod -v 8.3 pgsql` for PHP 8.3. The API requires PHP 8.1 or newer.
+
+If Apache runs PHP directly, restart Apache to load the extension:
+
+```sh
+sudo systemctl restart apache2
+```
+
+If the site uses PHP-FPM, restart its version-specific service instead, for
+example `sudo systemctl restart php8.3-fpm` for PHP 8.3.
+
+Check whether command-line PHP has loaded the extension:
+
+```sh
+php -r 'echo extension_loaded("pgsql") ? "pgsql enabled\n" : "pgsql missing\n";'
+```
+
+Apache/PHP-FPM can use a different PHP version or configuration from the command
+line. To verify the web runtime, temporarily create `server/public/check-pgsql.php`:
+
+```php
+<?php
+header('Content-Type: text/plain');
+echo 'PHP version: ' . PHP_VERSION . "\n";
+echo extension_loaded('pgsql') ? "pgsql enabled\n" : "pgsql missing\n";
+```
+
+After configuring the Apache alias, open the HTTPS URL
+`/sql-api/check-pgsql.php` on your server. Confirm PHP 8.1+ and `pgsql enabled`,
+then remove the temporary file.
+
+### Configure the Apache alias
 
 To load the deployment snippet without pasting it, add this line inside the
 HTTPS virtual host, using your checkout's absolute path:
